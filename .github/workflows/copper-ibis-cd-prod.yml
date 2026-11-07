@@ -41,6 +41,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: databricks/setup-cli@v1.23.0
+        with:
+          # The action tag pins the ACTION; this pins the CLI it installs.
+          # Without it the action's default lags behind the version
+          # databricks.yml requires, and `bundle validate` refuses to run.
+          version: 1.24.0
 
       - name: Validate
         run: databricks bundle validate --target prod
