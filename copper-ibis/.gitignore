@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Spark local runs
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Generated sample data
+sample_data/
+
+# Databricks bundles
+.databricks/
+
+# Terraform -- never commit state or credentials
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+*.auto.tfvars
+*.tfvars.json
+!terraform/envs/dev.tfvars
+!terraform/envs/prod.tfvars
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

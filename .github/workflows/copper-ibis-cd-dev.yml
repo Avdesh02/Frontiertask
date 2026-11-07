@@ -1,0 +1,99 @@
+# Deploy copper-ibis to dev and prove the pipeline actually works end to end.
+#
+# The integration test is the point: it seeds real files into the UC Volume, runs the
+# pipeline, and asserts on the resulting Unity Catalog tables. A green run means data
+# genuinely flowed bronze -> silver -> gold.
+#
+# Auth: personal access token in the DATABRICKS_TOKEN secret. See the README for why
+# this is not OIDC.
+
+name: copper-ibis CD (dev)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "copper-ibis/**"
+      - ".github/workflows/copper-ibis-cd-dev.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two concurrent deploys to the same target fight over the bundle deployment lock.
+  group: copper-ibis-cd-dev
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+defaults:
+  run:
+    working-directory: copper-ibis
+
+jobs:
+  deploy-and-test:
+    name: Deploy to dev and run integration tests
+    runs-on: ubuntu-latest
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      CATALOG: ${{ vars.DEV_CATALOG || 'wind_dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: databricks/setup-cli@v1.23.0
+
+      - name: Deploy bundle
+        run: databricks bundle deploy --target dev
+
+      - name: Generate seed data
+        # Deterministic seed so assertions on row counts are stable.
+        run: |
+          python tools/generate_sensor_data.py \
+            --out ./seed/sensors \
+            --with-dimension ./seed/turbines \
+            --turbines 12 \
+            --batches 3 \
+            --bad-rate 0.08 \
+            --seed 1337
+
+      - name: Upload seed data to the landing volume
+        run: |
+          VOLUME="/Volumes/${CATALOG}/raw/landing"
+          # Turbine master data first: the SCD2 dimension must exist before the gold
+          # as-of join has anything to match against.
+          databricks fs cp --recursive --overwrite ./seed/turbines "dbfs:${VOLUME}/turbines"
+          databricks fs cp --recursive --overwrite ./seed/sensors  "dbfs:${VOLUME}/sensors"
+
+      - name: Run the pipeline to completion
+        # `bundle deploy` kicks off an update of its own, so starting another here would
+        # fail with "an active update already exists". Wait for whatever is in flight,
+        # then trigger a clean run and wait for that.
+        #
+        # The continuous job is PAUSED in dev (see databricks.yml), so nothing relaunches
+        # the pipeline underneath these assertions.
+        run: python tools/await_pipeline.py --target dev --trigger
+
+      - name: Install integration test dependencies
+        # Separate step and separate extra: databricks-connect replaces pyspark, so it
+        # must not share an environment with the unit tests.
+        run: pip install -e ".[integration]"
+
+      - name: Integration tests
+        env:
+          DATABRICKS_CATALOG: ${{ env.CATALOG }}
+          DATABRICKS_SERVERLESS_COMPUTE_ID: auto
+        run: pytest tests/integration -v -m integration_test
+
+      - name: Pipeline event log on failure
+        if: failure()
+        # Surfaces the actual analysis or runtime error, rather than leaving you with
+        # only a non-zero exit code.
+        run: python tools/await_pipeline.py --target dev --errors-only || true

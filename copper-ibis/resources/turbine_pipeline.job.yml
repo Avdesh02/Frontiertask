@@ -1,0 +1,43 @@
+# Jobs that drive the pipeline.
+#
+# Why a job rather than `continuous: true` on the pipeline itself: the pipeline resource's
+# `continuous` and `trigger` fields are both deprecated. The supported way to run a
+# pipeline continuously is a job with a continuous trigger wrapping a pipeline_task.
+
+resources:
+  jobs:
+    turbine_pipeline_continuous:
+      name: wind_turbine_telemetry_continuous
+
+      tasks:
+        - task_key: run_turbine_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.turbine_pipeline.id}
+            # Never full-refresh on an always-on job: it would discard streaming state
+            # and reprocess the entire landing volume on every restart.
+            full_refresh: false
+
+      # Continuous: when an update finishes or fails, the job immediately starts another.
+      # Combined with Auto Loader this is what makes new files visible within seconds.
+      #
+      # PAUSED in dev, UNPAUSED in prod. In dev an always-on job fights with CI: it
+      # relaunches the pipeline the moment a triggered update is cancelled, so
+      # `bundle run` fails with "an active update already exists" and row counts move
+      # underneath the assertions.
+      continuous:
+        pause_status: ${var.continuous_pause_status}
+
+      # A continuous job restarting in a tight loop on a persistent error is expensive;
+      # this backs off instead.
+      queue:
+        enabled: true
+
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 86400
+
+      tags:
+        project: wind_turbine_telemetry
+        layer: orchestration

@@ -1,0 +1,97 @@
+# Pull request checks for copper-ibis. Validates everything checkable without deploying.
+#
+# This repo holds two independent deliverables (copper-ibis, jade-marmot), so this
+# workflow is both name-prefixed and path-scoped: it only runs when copper-ibis changes.
+#
+# Auth: personal access token in the DATABRICKS_TOKEN secret. OIDC would be preferable --
+# it needs no stored credential -- but it requires account-level federation policies,
+# which this Databricks account (Express Setup) does not expose. See the README.
+
+name: copper-ibis CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "copper-ibis/**"
+      - ".github/workflows/copper-ibis-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  TERRAFORM_VERSION: "1.9.8"
+
+defaults:
+  run:
+    working-directory: copper-ibis
+
+jobs:
+  lint-and-unit-test:
+    name: Lint and unit test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        # The `dev` extra pulls in pyspark. It must never be installed alongside
+        # databricks-connect, which ships its own conflicting `pyspark` module.
+        run: pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check src tools tests
+
+      - name: Unit tests
+        # Pure-transform tests against a local SparkSession -- no workspace required.
+        run: pytest tests/unit -v
+
+  validate-bundle:
+    name: Validate bundle
+    runs-on: ubuntu-latest
+    # Skipped until the token exists, so CI is not permanently red during setup.
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@v1.23.0
+
+      - name: Validate dev target
+        run: databricks bundle validate --target dev
+
+      - name: Validate prod target
+        # Catches prod-only mistakes (such as a missing root_path) at PR time rather
+        # than during a release.
+        run: databricks bundle validate --target prod
+
+  terraform-validate:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: copper-ibis/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Init
+        # No backend configured yet, so initialise locally. This still downloads the
+        # provider and is enough for `validate` to type-check the configuration.
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform validate
