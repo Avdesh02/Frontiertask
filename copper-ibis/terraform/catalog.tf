@@ -55,10 +55,10 @@ resource "databricks_schema" "layer" {
 # Auto Loader source. A UC Volume is what keeps this configuration cloud-agnostic: the
 # pipeline reads /Volumes/<catalog>/raw/landing/... regardless of the storage underneath.
 resource "databricks_volume" "landing" {
-  provider         = databricks.workspace
-  name             = "landing"
-  catalog_name     = databricks_catalog.wind.name
-  schema_name      = databricks_schema.layer["raw"].name
-  volume_type      = "MANAGED"
-  comment          = "Landing zone for sensor telemetry (sensors/) and turbine master data (turbines/)."
+  provider     = databricks.workspace
+  name         = "landing"
+  catalog_name = databricks_catalog.wind.name
+  schema_name  = databricks_schema.layer["raw"].name
+  volume_type  = "MANAGED"
+  comment      = "Landing zone for sensor telemetry (sensors/) and turbine master data (turbines/)."
 }

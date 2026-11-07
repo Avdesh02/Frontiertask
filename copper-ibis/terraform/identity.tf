@@ -20,9 +20,9 @@ resource "databricks_service_principal" "ci" {
   provider     = databricks.account
   display_name = "wind-turbine-ci-${var.environment}"
 
-  # Deployment identity only: it must never be able to log into the UI interactively.
-  workspace_access   = true
-  databricks_sql_acl = true
+  # A deployment identity: it needs workspace access to run the pipeline, but no
+  # ability to spin up its own clusters -- the pipeline is serverless.
+  workspace_access     = true
   allow_cluster_create = false
 }
 

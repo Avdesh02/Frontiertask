@@ -9,6 +9,14 @@ from pyspark.sql import Row
 
 from turbine_pipeline.lib import quality
 
+# Spark cannot infer a column's type when it is null in every row, which is exactly the
+# case these tests construct. Stating the schema avoids CANNOT_DETERMINE_TYPE.
+READING_SCHEMA = (
+    "turbine_id string, tag string, value double, quality string, event_ts timestamp"
+)
+
+CDC_SCHEMA = "turbine_id string, operation string, change_seq long"
+
 
 @pytest.fixture()
 def flagged(spark):
@@ -24,7 +32,7 @@ def flagged(spark):
         Row(turbine_id="WTG-0005", tag="oil_temperature", value=float("nan"), quality="GOOD",
             event_ts=dt.datetime(2026, 11, 7, 10, 0)),
     ]
-    df = spark.createDataFrame(rows)
+    df = spark.createDataFrame(rows, schema=READING_SCHEMA)
     return {
         r.turbine_id: r
         for r in quality.with_quality_flags(df, quality.READING_RULES).collect()
@@ -60,8 +68,10 @@ def test_nan_value_is_invalid(flagged):
 
 def test_null_predicate_result_counts_as_failure(spark):
     """A rule evaluating to NULL must quarantine the row, never pass it silently."""
+    # Explicit schema: event_ts is null in every row, so inference cannot type it.
     df = spark.createDataFrame(
-        [Row(turbine_id="WTG-0001", tag="x", value=1.0, quality="GOOD", event_ts=None)]
+        [Row(turbine_id="WTG-0001", tag="x", value=1.0, quality="GOOD", event_ts=None)],
+        schema=READING_SCHEMA,
     )
     row = quality.with_quality_flags(df, quality.READING_RULES).first()
     assert row.is_valid is False
@@ -71,7 +81,8 @@ def test_null_predicate_result_counts_as_failure(spark):
 def test_violation_reasons_lists_every_failure(spark):
     df = spark.createDataFrame(
         [Row(turbine_id=None, tag=None, value=None, quality="BAD",
-             event_ts=dt.datetime(2026, 11, 7, 10, 0))]
+             event_ts=dt.datetime(2026, 11, 7, 10, 0))],
+        schema=READING_SCHEMA,
     )
     row = quality.with_quality_flags(df, quality.READING_RULES).first()
     assert set(row.violation_reasons) >= {
@@ -88,7 +99,8 @@ def test_cdc_rules_reject_unorderable_rows(spark):
             Row(turbine_id="WTG-0001", operation="UPSERT", change_seq=1),
             Row(turbine_id="WTG-0002", operation="UPSERT", change_seq=None),
             Row(turbine_id="WTG-0003", operation="WAT", change_seq=1),
-        ]
+        ],
+        schema=CDC_SCHEMA,
     )
     verdicts = {
         r.turbine_id: r.is_valid
