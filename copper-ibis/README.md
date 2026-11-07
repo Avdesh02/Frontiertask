@@ -58,7 +58,13 @@ to the rating that was in force *at the time*, not today's. That is what
 ├── src/turbine_pipeline/
 │   ├── lib/                        PURE PySpark — no pipeline imports, unit testable
 │   └── transformations/            thin @dp-decorated wrappers
-├── tools/generate_sensor_data.py   synthetic data generator (local or job)
+├── tools/
+│   ├── generate_sensor_data.py     synthetic data generator (local or job)
+│   ├── bootstrap_uc.sql            catalog/schemas/volume, parameterized by ${catalog}
+│   ├── run_sql.py                  runs SQL via a warehouse, with --set substitution
+│   ├── await_pipeline.py           drives a pipeline run to a verified COMPLETED state
+│   ├── grant_ci.sql                UC grants for a CI service principal
+│   └── setup_oidc.sh               creates the OIDC service principal (see CI auth)
 ├── tests/unit/                     pytest + local SparkSession, no workspace needed
 ├── tests/integration/              databricks-connect assertions on real UC tables
 └── terraform/                      catalog, schemas, volume, SP, OIDC policy, grants
@@ -147,11 +153,14 @@ terraform apply -var-file=envs/dev.tfvars
 > ships with local state and a TODO listing the S3/azurerm/gcs stanzas. Use a separate
 > state key per environment.
 
-**Or bootstrap with SQL** (what this workspace actually used):
+**Or bootstrap with SQL** (what this workspace actually used), once per environment:
 
 ```bash
 python tools/run_sql.py --profile wind --warehouse <warehouse-id> \
-  --file tools/bootstrap_uc.sql
+  --file tools/bootstrap_uc.sql --set catalog=wind_dev
+
+python tools/run_sql.py --profile wind --warehouse <warehouse-id> \
+  --file tools/bootstrap_uc.sql --set catalog=wind_prod
 ```
 
 This exists because the `databricks catalogs create` CLI command cannot request
@@ -159,6 +168,9 @@ This exists because the `databricks catalogs create` CLI command cannot request
 with *"Metastore storage root URL does not exist"*. SQL `CREATE CATALOG` handles it
 natively. The script is idempotent; to adopt these objects into Terraform later, use
 `terraform import` rather than re-creating them.
+
+Both catalogs exist in this workspace already, each with `raw`, `bronze`, `silver`,
+`gold`, and `ops` schemas plus the `raw.landing` Volume.
 
 ### 4. Wire up GitHub
 

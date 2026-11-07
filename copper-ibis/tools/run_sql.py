@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,25 @@ def run_statement(cli: str, profile: str, warehouse: str, statement: str, timeou
     if brace == -1:
         return {"status": {"state": "NO_JSON", "error": {"message": stdout.strip()[:500]}}}
     return json.loads(stdout[brace:])
+
+
+def substitute(text: str, values: dict[str, str]) -> str:
+    """Replace ``${key}`` placeholders, failing loudly on any that are left over.
+
+    An unsubstituted placeholder would otherwise reach Databricks as literal SQL and
+    produce a confusing parse error far from the real cause -- a forgotten ``--set``.
+    """
+    for key, value in values.items():
+        text = text.replace("${" + key + "}", value)
+
+    leftover = sorted(set(re.findall(r"\$\{(\w+)\}", text)))
+    if leftover:
+        raise SystemExit(
+            "missing substitutions for: "
+            + ", ".join(leftover)
+            + "\nPass them with --set KEY=VALUE"
+        )
+    return text
 
 
 def split_statements(text: str) -> list[str]:
@@ -172,14 +192,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warehouse", required=True)
     parser.add_argument("--cli", default=DEFAULT_CLI)
     parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="substitute ${KEY} in the SQL, e.g. --set catalog=wind_prod (repeatable)",
+    )
+    parser.add_argument(
         "--continue-on-error",
         action="store_true",
         help="keep going after a failed statement instead of stopping",
     )
     args = parser.parse_args(argv)
 
+    substitutions = {}
+    for item in args.set:
+        if "=" not in item:
+            parser.error(f"--set expects KEY=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        substitutions[key.strip()] = value.strip()
+
     if args.file:
-        statements = split_statements(open(args.file, encoding="utf-8").read())
+        statements = split_statements(
+            substitute(open(args.file, encoding="utf-8").read(), substitutions)
+        )
     elif args.statement:
         statements = [args.statement]
     else:
