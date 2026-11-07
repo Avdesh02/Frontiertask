@@ -1,8 +1,12 @@
 """Fixtures for tests that run against a live Databricks workspace.
 
-These require credentials and a deployed `dev` bundle. They are selected by the
-`integration_test` marker and skipped automatically when the environment is not
-configured, so a plain `pytest` on a laptop does not fail with auth errors.
+Skipping policy, which matters more than it looks: these tests skip when the environment
+is *deliberately* not configured (a laptop with no credentials), but **fail** when the
+environment claims to be configured and something is wrong. Skipping on a missing
+dependency or a broken connection would let CI report success while asserting nothing --
+which is exactly what happened before ``REQUIRE_INTEGRATION_TESTS`` existed.
+
+CI sets ``REQUIRE_INTEGRATION_TESTS=1`` so a skip there is a hard error.
 """
 
 from __future__ import annotations
@@ -17,6 +21,22 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value.strip() if isinstance(value, str) else value
 
 
+def _required() -> bool:
+    """Whether a skip should be escalated to a failure."""
+    return _env("REQUIRE_INTEGRATION_TESTS", "").lower() in ("1", "true", "yes")
+
+
+def _unavailable(reason: str):
+    """Skip locally, fail loudly where these tests are mandatory."""
+    if _required():
+        pytest.fail(
+            f"{reason}\n"
+            "REQUIRE_INTEGRATION_TESTS is set, so this is a failure rather than a skip -- "
+            "a silently skipped suite reports success while asserting nothing."
+        )
+    pytest.skip(reason)
+
+
 @pytest.fixture(scope="session")
 def catalog() -> str:
     return _env("DATABRICKS_CATALOG", "wind_dev")
@@ -26,14 +46,16 @@ def catalog() -> str:
 def workspace():
     """Databricks SDK client, authenticated from the ambient environment.
 
-    In CI that is OIDC (`DATABRICKS_AUTH_TYPE=github-oidc`); locally it is a profile or
-    `DATABRICKS_TOKEN`. The SDK's default credential chain handles both, so nothing about
-    auth is hardcoded here.
+    Auth comes from the SDK's default credential chain -- a PAT in DATABRICKS_TOKEN, a
+    CLI profile, or OIDC -- so nothing about authentication is hardcoded here.
     """
     if not _env("DATABRICKS_HOST"):
-        pytest.skip("DATABRICKS_HOST is not set; skipping integration tests")
+        _unavailable("DATABRICKS_HOST is not set")
 
-    from databricks.sdk import WorkspaceClient
+    try:
+        from databricks.sdk import WorkspaceClient
+    except ImportError as exc:
+        _unavailable(f"databricks-sdk is not installed: {exc}")
 
     return WorkspaceClient()
 
@@ -43,17 +65,20 @@ def spark(workspace):
     """A Spark session backed by the remote workspace via Databricks Connect."""
     try:
         from databricks.connect import DatabricksSession
-    except ImportError:  # pragma: no cover - depends on which extra is installed
-        pytest.skip("databricks-connect is not installed; install the `integration` extra")
+    except ImportError as exc:
+        _unavailable(
+            f"databricks-connect is not installed ({exc}); install the `integration` extra"
+        )
 
-    serverless = _env("DATABRICKS_SERVERLESS_COMPUTE_ID", "auto")
     cluster_id = _env("DATABRICKS_CLUSTER_ID")
-
-    builder = DatabricksSession.builder
-    if cluster_id:
-        session = builder.clusterId(cluster_id).getOrCreate()
-    else:
-        session = builder.serverless(serverless == "auto" or bool(serverless)).getOrCreate()
+    try:
+        if cluster_id:
+            session = DatabricksSession.builder.clusterId(cluster_id).getOrCreate()
+        else:
+            # Serverless compute: no cluster to provision or keep warm.
+            session = DatabricksSession.builder.serverless(True).getOrCreate()
+    except Exception as exc:
+        _unavailable(f"could not open a Databricks Connect session: {exc}")
 
     yield session
     session.stop()
