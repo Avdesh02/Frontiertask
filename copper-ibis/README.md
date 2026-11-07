@@ -183,38 +183,74 @@ databricks bundle deploy --target dev
 
 ---
 
-## How OIDC authentication works
+## CI authentication
 
-GitHub mints a short-lived token per workflow run; Databricks validates it against the
-federation policy and issues an access token for the service principal. Three env vars,
-no secret:
+### What is in use: a personal access token
+
+```yaml
+env:
+  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}     # repo variable, not sensitive
+  DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }} # repo secret
+```
+
+Create the token at **Settings → Developer → Access tokens** in the workspace. Give it
+the shortest lifetime you can live with and set a calendar reminder to rotate it — a
+long-lived credential in CI is a standing risk, and it is the thing OIDC exists to remove.
+
+### Why not OIDC
+
+OIDC is the better design and is **fully implemented here** — `terraform/identity.tf` and
+`tools/setup_oidc.sh` both create the service principal and its federation policies. It
+simply cannot be enabled on this Databricks account.
+
+Federation policies are **account-level** objects. This workspace belongs to a
+Databricks-managed *Express Setup* account (no `credentials_id`, no
+`storage_configuration_id`, Default Storage metastore), and every account-admin API
+returns **403** regardless of the role shown in the console:
+
+| Endpoint | Status |
+| --- | --- |
+| `accounts/{id}/workspaces` | 200 |
+| `accounts/{id}/scim/v2/Users` | 403 |
+| `accounts/{id}/scim/v2/ServicePrincipals` | 403 |
+| `accounts/{id}/federationPolicies` | 403 |
+| `accounts/{id}/metastores` | 403 |
+
+The token itself is valid — correct user, correct account audience, `all-apis` scope,
+unexpired. `metastores` returning 403 is the clearest signal, since any account admin can
+read it. Note the CLI reports these as *"user is unauthenticated"*, which is misleading;
+the wire response is a plain 403.
+
+### Switching to OIDC later
+
+When the account allows account-admin API access:
+
+```bash
+databricks auth login --host https://accounts.cloud.databricks.com \
+  --account-id <account-id> --profile wind-account --skip-workspace
+bash tools/setup_oidc.sh
+python tools/run_sql.py --profile wind --warehouse <id> --file tools/grant_ci.sql
+```
+
+Then in each workflow, replace the `DATABRICKS_TOKEN` secret with:
 
 ```yaml
 permissions:
   id-token: write        # without this, no token is minted at all
 env:
   DATABRICKS_AUTH_TYPE: github-oidc
-  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
   DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
 ```
 
-**Federation subjects are exact-match — no wildcards.** Each GitHub environment needs its
-own policy, which is why Terraform creates one per environment and every workflow job
-declares `environment:`.
-
-### When auth fails
+…and add `environment: dev` / `environment: prod` to the jobs. **Federation subjects are
+exact-match with no wildcards**, so each GitHub environment needs its own policy — which
+is why `setup_oidc.sh` creates two.
 
 > ⚠️ Repositories created, renamed, or transferred **on or after 2026-07-15** use
-> immutable numeric IDs in the subject:
-> `repo:octo-org@123456/octo-repo@456789:environment:prod`.
-> **A later rename silently breaks authentication.**
-
-To fix: read the actual `sub` from the failing run's token, then set
-`github_subject_override` in your tfvars and re-apply. Compare against:
-
-```bash
-terraform output oidc_subject
-```
+> immutable numeric IDs in the subject
+> (`repo:octo-org@123456/octo-repo@456789:environment:prod`), so **a later rename
+> silently breaks authentication.** If that happens, read the actual `sub` from the
+> failing run's token and set `github_subject_override` in your tfvars.
 
 ---
 
@@ -310,17 +346,39 @@ pip install -e ".[integration]"  # integration tests (installs databricks-connec
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `copper-ibis-ci.yml` | pull request | ruff, unit tests, `bundle validate` (dev **and** prod), `terraform plan` |
+| `copper-ibis-ci.yml` | pull request | ruff, unit tests, `bundle validate` (dev **and** prod), `terraform validate` |
 | `copper-ibis-cd-dev.yml` | push to `main` | deploy dev → seed the Volume → run the pipeline → integration tests |
-| `copper-ibis-cd-prod.yml` | manual / `copper-ibis-v*` tag | optional `terraform apply` → deploy prod → start the continuous job |
+| `copper-ibis-cd-prod.yml` | manual / `copper-ibis-v*` tag | deploy prod → start the continuous job |
 
 `copper-ibis-cd-dev.yml` is the real proof: it seeds files, runs the pipeline to
 completion, and asserts on the resulting Unity Catalog tables. Green means data actually
 flowed.
 
-Every Databricks-touching job is guarded by `if: vars.DATABRICKS_CLIENT_ID != ''`, so
-until you create the OIDC service principal those jobs skip rather than fail. Lint and
-unit tests run regardless.
+Jobs needing workspace access are guarded by `if: vars.DATABRICKS_HOST != ''`, so they
+skip rather than fail before the variable is set. Lint, unit tests, and
+`terraform validate` run regardless.
+
+### Required repository configuration
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Variable | `DATABRICKS_HOST` | your workspace URL |
+| Secret | `DATABRICKS_TOKEN` | a workspace personal access token |
+
+Settings → Secrets and variables → Actions. `prod` also needs a GitHub **environment**
+with required reviewers, which is what gates the production deploy.
+
+### Two CI pitfalls this handles
+
+**`bundle deploy` starts its own pipeline update**, so a following `bundle run` fails
+with *"an active update already exists"*. And **a pipeline reaching `IDLE` does not mean
+success** — a failed update is also idle. `tools/await_pipeline.py` waits out the
+in-flight update, triggers a clean one, and asserts the update state is `COMPLETED`,
+dumping the error events if it is not.
+
+**The continuous job is `PAUSED` in dev** (`var.continuous_pause_status`). Left running,
+it relaunches the pipeline the instant a triggered update finishes, so row counts shift
+underneath the integration assertions. Prod sets it `UNPAUSED` for always-on streaming.
 
 ---
 
