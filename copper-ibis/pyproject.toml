@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turbine-pipeline"
+version = "0.1.0"
+description = "Wind turbine telemetry ingestion on Lakeflow Spark Declarative Pipelines"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# Local unit testing. pyspark and databricks-connect cannot coexist -- databricks-connect
+# ships its own `pyspark` module and shadows this one. Keep them in separate extras and
+# never install both into the same environment.
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "pyspark>=3.5,<5.0",
+]
+# CI integration tests run against a real workspace via Databricks Connect.
+integration = [
+    "pytest>=8.0",
+    "databricks-connect>=16.1",
+    "databricks-sdk>=0.38",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration_test: runs against a live Databricks workspace (needs credentials)",
+]
+filterwarnings = [
+    # Spark on JDK 8/11 is noisy about illegal reflective access.
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tools", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    # Pipeline transformation modules define functions whose names are the dataset names and
+    # are never referenced locally -- the decorator registers them.
+    "F811",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Lakeflow injects `spark` into the module namespace; linters see it as undefined.
+"src/turbine_pipeline/transformations/*" = ["F821"]

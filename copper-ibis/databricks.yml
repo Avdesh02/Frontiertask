@@ -1,0 +1,61 @@
+# Declarative Automation Bundle (DAB) for the wind turbine telemetry pipeline.
+#
+# Scope boundary: this bundle owns *workloads* (the pipeline and its jobs). Unity Catalog
+# itself -- catalogs, schemas, volumes, grants, and the CI service principal -- is owned by
+# Terraform under ./terraform. That split follows Databricks' own IaC guidance, and since
+# CLI 1.20.0 removed the Terraform deployment engine the two tools are fully decoupled.
+
+bundle:
+  name: wind_turbine_telemetry
+  databricks_cli_version: ">= 1.24.0"
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog holding every layer of this pipeline.
+    default: wind_dev
+  bronze_schema:
+    description: Schema the pipeline publishes its datasets into.
+    default: bronze
+  raw_schema:
+    description: Schema owning the landing Volume.
+    default: raw
+  landing_volume:
+    description: Volume name under the raw schema where source files arrive.
+    default: landing
+  notification_email:
+    description: Address for pipeline failure alerts. Empty disables notifications.
+    default: ""
+  continuous_pause_status:
+    description: >-
+      Whether the continuous job drives the pipeline. PAUSED in dev so CI can run a
+      single triggered update and assert on a settled result; UNPAUSED in prod for
+      always-on streaming.
+    default: PAUSED
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: wind_dev
+    presets:
+      # Dev updates run in development mode: compute is reused between updates and tables
+      # are not recomputed from scratch, which makes the edit/run loop much faster.
+      pipelines_development: true
+      trigger_pause_status: PAUSED
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: wind_prod
+      continuous_pause_status: UNPAUSED
+    presets:
+      pipelines_development: false
+      trigger_pause_status: UNPAUSED

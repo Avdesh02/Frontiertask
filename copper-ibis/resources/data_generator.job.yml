@@ -1,0 +1,45 @@
+# Synthetic telemetry generator, as a job.
+#
+# Running the generator inside the workspace (rather than from a laptop) is what makes the
+# real-time demo convincing: files land directly in the Volume and the continuous pipeline
+# picks them up within seconds, with no upload latency in between.
+
+resources:
+  jobs:
+    turbine_data_generator:
+      name: wind_turbine_data_generator
+
+      tasks:
+        - task_key: generate
+          spark_python_task:
+            python_file: ../tools/generate_sensor_data.py
+            parameters:
+              - --volume
+              - /Volumes/${var.catalog}/${var.raw_schema}/${var.landing_volume}/sensors
+              - --with-dimension
+              - /Volumes/${var.catalog}/${var.raw_schema}/${var.landing_volume}/turbines
+              - --turbines
+              - "25"
+              # Drip one file every 10s for 10 minutes -- long enough to watch rows
+              # accumulate in Unity Catalog while it runs.
+              - --interval
+              - "10"
+              - --duration
+              - "600"
+              # Deliberate corruption so the quarantine table is exercised.
+              - --bad-rate
+              - "0.07"
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            # `environment_version` is required; the older `client` field is deprecated.
+            environment_version: "2"
+
+      # On demand only. Flip to a schedule if you want a continuously populated demo.
+      max_concurrent_runs: 1
+
+      tags:
+        project: wind_turbine_telemetry
+        layer: tooling

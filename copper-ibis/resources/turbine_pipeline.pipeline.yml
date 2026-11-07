@@ -1,0 +1,67 @@
+# The Lakeflow Spark Declarative Pipeline.
+#
+# Deliberately NOT declared in Terraform: Databricks' IaC guidance puts Unity Catalog in
+# Terraform and workloads (pipelines, jobs) in a bundle. Keeping the pipeline here also
+# means `terraform destroy` on the infra can never silently drop the datasets.
+
+resources:
+  pipelines:
+    turbine_pipeline:
+      name: wind_turbine_telemetry
+      catalog: ${var.catalog}
+      # `schema`, not `target` -- `target` is deprecated.
+      #
+      # In default publishing mode this is only the fallback for UNQUALIFIED names. Every
+      # dataset here is fully qualified (see src/turbine_pipeline/lib/naming.py), so the
+      # pipeline actually publishes across bronze/silver/gold and this value is near
+      # cosmetic. Keeping it set to bronze means an accidentally unqualified dataset
+      # lands somewhere sensible rather than in a surprising schema.
+      schema: ${var.bronze_schema}
+
+      # Serverless: no cluster to size, Photon always on, and it is what AUTO CDC
+      # requires outside the Pro/Advanced editions.
+      serverless: true
+      channel: CURRENT
+
+      # Added to sys.path, so `from turbine_pipeline.lib...` resolves inside the pipeline.
+      root_path: ../src
+
+      libraries:
+        # A glob picks up new transformation modules without editing this file.
+        # Note: `glob` cannot be combined with `file:` or `notebook:` entries.
+        - glob:
+            include: ../src/turbine_pipeline/transformations/**
+
+      # Published to Unity Catalog so pipeline health is queryable with SQL rather than
+      # only visible in the UI.
+      event_log:
+        catalog: ${var.catalog}
+        schema: ops
+        name: turbine_pipeline_event_log
+
+      configuration:
+        # --- Catalog ------------------------------------------------------------------
+        # Every dataset name is built from this at runtime. Passing it as configuration
+        # (rather than hardcoding) is what lets dev and prod deploy identical source.
+        turbine.catalog: ${var.catalog}
+
+        # --- Auto Loader source paths -------------------------------------------------
+        turbine.landing.sensors_path: /Volumes/${var.catalog}/${var.raw_schema}/${var.landing_volume}/sensors
+        turbine.landing.turbines_path: /Volumes/${var.catalog}/${var.raw_schema}/${var.landing_volume}/turbines
+
+        # --- Gold rollup --------------------------------------------------------------
+        turbine.gold.window_duration: 5 minutes
+
+        # --- Alert thresholds ---------------------------------------------------------
+        # Kept as configuration rather than constants so limits can be retuned per
+        # environment without a code change or redeploy.
+        turbine.threshold.gear_friction.warn_max: "0.55"
+        turbine.threshold.gear_friction.critical_max: "0.75"
+
+        turbine.threshold.oil_temperature.warn_min: "5.0"
+        turbine.threshold.oil_temperature.warn_max: "85.0"
+        turbine.threshold.oil_temperature.critical_min: "-10.0"
+        turbine.threshold.oil_temperature.critical_max: "95.0"
+
+        turbine.threshold.blade_velocity.warn_max: "18.0"
+        turbine.threshold.blade_velocity.critical_max: "22.0"

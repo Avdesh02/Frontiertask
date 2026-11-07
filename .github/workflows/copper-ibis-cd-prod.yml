@@ -1,0 +1,68 @@
+# Production release for copper-ibis. Manual by design -- nothing reaches prod on a merge.
+#
+# The `prod` GitHub environment should have required reviewers configured; that approval
+# gate is what makes this workflow safe to trigger.
+
+name: copper-ibis CD (prod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_continuous:
+        description: "Start the continuous pipeline job after deploying"
+        type: boolean
+        default: true
+  push:
+    tags: ["copper-ibis-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: copper-ibis-cd-prod
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: copper-ibis
+
+jobs:
+  deploy:
+    name: Deploy bundle to prod
+    runs-on: ubuntu-latest
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    # Put required reviewers on this environment in repo settings -- that approval is
+    # the gate protecting production.
+    environment: prod
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: databricks/setup-cli@v1.23.0
+        with:
+          # The action tag pins the ACTION; this pins the CLI it installs.
+          # Without it the action's default lags behind the version
+          # databricks.yml requires, and `bundle validate` refuses to run.
+          version: 1.24.0
+
+      - name: Validate
+        run: databricks bundle validate --target prod
+
+      - name: Deploy
+        run: databricks bundle deploy --target prod
+
+      - name: Start continuous pipeline job
+        if: ${{ inputs.start_continuous }}
+        # In prod the job's continuous trigger is UNPAUSED, so this puts the pipeline
+        # into always-on streaming. Deploying alone does not start it.
+        run: databricks bundle run turbine_pipeline_continuous --target prod --no-wait
+
+      - name: Summary
+        run: databricks bundle summary --target prod
+
+  # Terraform is intentionally NOT run here. The Unity Catalog objects for this project
+  # were created outside Terraform (see tools/bootstrap_uc.sql), so an apply would try to
+  # create them again and fail. Adopt them with `terraform import` first, then add an
+  # apply job back.
